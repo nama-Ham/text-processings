@@ -3,19 +3,11 @@ import MeCab
 import sqlite3
 import re
 import random
-import csv
+import numpy as np
 
 
-def confirm_pos(word, pos):
-    result = None
-    poss = analyze_pos(word)
-    for p in poss:
-        if p["pos"] == pos:
-            result = p
-    return result
-
-
-def transform(pos, basic, conjugate):
+def transform(basic, conjugate):
+    pos, a = analyze_pos(basic)
     target_verb = None
     dict_file = None
     if pos == "形容詞":
@@ -26,10 +18,10 @@ def transform(pos, basic, conjugate):
         dict_file = "Adverb"
     elif pos == "名詞":
         dict_file = "Noun"
-    elif pos == "助詞":
-        dict_file = "Postp"
+    #elif pos == "助詞":
+    #    dict_file = "Postp"
 
-    with open("dict/" + dict_file + ".csv", "rb") as f:
+    with open("../dict/pos/" + dict_file + ".csv", "rb") as f:
         verbs = f.readlines()
     for v in verbs:
         vinfo = v.decode('euc_jp',errors ='ignore').split(",")
@@ -40,10 +32,27 @@ def transform(pos, basic, conjugate):
             break
     return target_verb
 
+def analyze_pos(word):
+    m = MeCab.Tagger()
+    node = m.parseToNode(word)
+    p,kb = None, None
+    count = 0
+    while node:
+        pos = node.feature.split(",")[0]
+        if pos != "BOS/EOS":
+            p = pos
+            count += 1
+            if len(node.feature.split(",")) > 7:
+                kb = node.feature.split(",")[7]
+        node = node.next
+    # 合成語の場合は品詞特定不可とする
+    if count > 1:
+        p,kb = None, None
+    return p, kb
 
 
-def search_sim_words(word):
-    conn = sqlite3.connect("wnjpn.db")
+def search_synonyms(word):
+    conn = sqlite3.connect("../dict/synonym/wnjpn.db")
     cur = conn.execute("select wordid from word where lemma='%s'" % word)
     word_id = -1
     for row in cur:
@@ -68,28 +77,19 @@ def search_sim_words(word):
     return similar_words
 
 
-def confirm_pos(word):
-    m = MeCab.Tagger()
-    node = m.parseToNode(word)
-    p = None
-    while node:
-        pos = node.feature.split(",")[0]
-        if pos != "BOS/EOS":
-            p = pos
+def choose_synonym(word):
+    synonym = word
+    pos, basic = analyze_pos(word)
+    synonyms = search_synonyms(word)
+    print(synonyms)
+    idxs = np.arange(0, len(synonyms), 1)
+    np.random.shuffle(idxs)
+    for idx in idxs:        
+        synonym_pos, synonym_basic = analyze_pos(synonyms[idx])
+        if synonym_pos == pos and synonym_basic == basic:
+            synonym = synonyms[idx]
             break
-        node = node.next
-    return p
-
-
-def choose_sim_word(words, pos):
-    while True:
-        r_idx = random.randint(0, len(words)-1)
-        c_word = words[r_idx]
-        sim_word_pos = confirm_pos(c_word)
-        if sim_word_pos == pos:
-            break
-    return c_word
-
+    return synonym
 
 
 def convert_kata_to_hira(katakana):
@@ -104,52 +104,80 @@ def convert_kata_to_hira(katakana):
     return hiragana
 
 
+def mistake_ppp(ppp):
+    substitute_ppp = ppp
+    mistake_set = np.array([["が", "は"],["から", "より"], ['を', 'に']])
+    target_pattern = mistake_set[np.any(mistake_set == ppp, axis = 1)]
+    if len(target_pattern) > 0:
+        the_other = target_pattern[np.where(target_pattern != ppp)]
+        substitute_ppp = the_other[0]
+    return substitute_ppp
+
+
 m = MeCab.Tagger()
 
-#text = "英語の勉強をしていて、うーん自分の英語ってどう聞こえているのかなと気になったので、日本語を弱らせてみました"
-#text = "自分の日本語を弱らせてみようかなと思いました。なんの役にも立たない記事でごめんなさい。"
-text = "英語の勉強をしていて、うーん自分の英語ってどう聞こえているのかなと気になったので、自分の日本語を弱らせてみようかなと思いました。なんの役にも立たない記事でごめんなさい。"
+text = "耳の外側と内側のノイズをマイクロフォンが検知。その音と釣り合うアンチノイズ機能が、あなたが聞く前にノイズを消し去ります。"
+text += "周囲の様子を聞いて対応したい時は、外部音取り込みモードに切り替えましょう。感圧センサーを長押しするだけです。"
 node = m.parseToNode(text)
 
 word_list = []
 basic_list = []
+pos_list = []
 word_idx = 0 
 
 while node:
     word = node.surface
+    print(node.feature.split(","))
     pos = node.feature.split(",")[0]
-    #conj = node.feature.split(",")[5]
-    org = node.feature.split(",")[6]
-    katakana = node.feature.split(",")[7]
+    conj = node.feature.split(",")[5]
+    basic = node.feature.split(",")[6]
+    if len(node.feature.split(",")) > 7:
+        katakana = node.feature.split(",")[7]
     xfmd_word = None
-    # 文頭・文末の空白の場合
-    if word == "":
-        xfmd_word = word
-        # 基本形を保存
-        basic_list.append(org)
-        # word_list.append(xfmd_word)
-    # それ以外の場合
-    else:
-        # 変換パターン①：{過去形}+た => {現在形}
-        if word == "た" and pos == "助動詞":
-            # 前の単語を現在形に置換する
-            word_list[word_idx - 1] =  basic_list[word_idx - 1]     
-            basic_list.append("")
-            xfmd_word = ""
-            #word_list.append("")
-        else:
-            # 記号は変換しない
-            if pos == "記号":
-                basic_list.append(org)
-                xfmd_word = word
-            # 変換パターン②：{漢字} => {ひらがな}
+    xfmd_basic = None
+    # 変換パターン①：助詞の混同
+    if pos == "助詞" and pos_list[word_idx - 1] == "名詞":
+        xfmd_basic = basic
+        xfmd_word = mistake_ppp(basic)
+    # 変換パターン②：{過去形}+た => {現在形}
+    elif pos == "助動詞" and word == "た":
+        # 前の単語を現在形に置換する
+        word_list[word_idx - 1] =  basic_list[word_idx - 1]
+        xfmd_basic = ""
+        xfmd_word = ""
+    # 変換パターン③：同音類義語変換
+    elif pos in ("動詞", "形容詞", "名詞"):
+        xfmd_basic = basic
+        if basic != "*":
+            synonym_basic = choose_synonym(basic)
+            if pos in ("動詞", "形容詞"):
+                xfmd_word = transform(synonym_basic, conj)
             else:
-                basic_list.append(org)
-                xfmd_word = convert_kata_to_hira(katakana)
-                #word_list.append(xfmd_word)
+                xfmd_word = synonym_basic
+        else:
+            xfmd_word = word
+    # 変換なし
+    else:
+        xfmd_basic = basic
+        xfmd_word = word
+    pos_list.append(pos)
+    basic_list.append(xfmd_basic)
     word_list.append(xfmd_word)
     word_idx += 1;
     node = node.next
 
+
+#print(pos_list)
+#print(basic_list)
+print(word_list)
 xfmd_word_str = u"".join(word_list)
+print(text)
+print("===>")
 print(xfmd_word_str)
+
+#basic = "聞く"
+#print(analyze_pos(basic))
+#synonym_basic = choose_synonym(basic)
+#print(synonym_basic)
+#xfmd_word = transform(synonym_basic, conj)
+#print(xfmd_word)
