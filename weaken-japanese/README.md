@@ -1,1 +1,1 @@
-# text-processings
+# 翻弱機を作ってみました

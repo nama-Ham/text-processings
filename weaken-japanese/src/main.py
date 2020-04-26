@@ -3,93 +3,96 @@ import MeCab
 import sqlite3
 import re
 import random
-import csv
+import numpy as np
+from collections import namedtuple
 
 
-def confirm_pos(word, pos):
-    result = None
-    poss = analyze_pos(word)
-    for p in poss:
-        if p["pos"] == pos:
-            result = p
-    return result
+Word = namedtuple('Word', 'wordid lang lemma pron pos')
+Sense = namedtuple('Sense', 'synset wordid lang rank lexid freq src')
+Synset = namedtuple('Synset', 'synset pos name src')
+#SynsetDef = namedtuple('SynsetDef', 'synset lang defi sid')
+conn = sqlite3.connect("../dict/synonym/wnjpn.db")
+
+def get_word(lemma):
+    cur = conn.execute("select * from word where lemma=?", (lemma,))
+    return [Word(*row) for row in cur]
+
+def get_senses(word, lang="jpn"):
+    cur = conn.execute("select * from sense where wordid=? and lang=?", (word.wordid, lang))
+    return [Sense(*row) for row in cur]
+
+def get_words_from_synset(synset, word, lang):
+    cur = conn.execute("select word.* from sense, word where synset=? and word.lang=? and sense.wordid=word.wordid and word.wordid<>?;", (synset, lang, word.wordid))
+    return [Word(*row) for row in cur]
+
+def search_synonyms(word):
+    wobj = get_word(word)
+    synonym_list = []
+    if wobj:
+        senses = get_senses(wobj[0])
+        for s in senses:
+            synonyms = get_words_from_synset(s.synset, wobj[0], "jpn")
+            for syn in synonyms:
+                if syn.lemma not in synonym_list:
+                    synonym_list.append(syn.lemma)
+    return synonym_list
+
+
+def choose_synonym(word):
+    synonym = word
+    pos, basic = analyze_pos(word)
+    synonyms = search_synonyms(word)
+    idxs = np.arange(0, len(synonyms), 1)
+    np.random.shuffle(idxs)
+    for idx in idxs:        
+        synonym_pos, synonym_basic = analyze_pos(synonyms[idx])
+        if synonym_pos == pos and synonym_basic == basic:
+            synonym = synonyms[idx]
+            break
+    return synonym
 
 
 def transform(pos, basic, conjugate):
-    target_verb = None
+    target_word = None
     dict_file = None
-    if pos == "形容詞":
-        dict_file = "Adj"
-    elif pos == "動詞":
+
+    if pos == "動詞":
         dict_file = "Verb"
+    elif pos == "形容詞":
+        dict_file = "Adj"
     elif pos == "副詞":
         dict_file = "Adverb"
     elif pos == "名詞":
         dict_file = "Noun"
-    elif pos == "助詞":
-        dict_file = "Postp"
 
-    with open("dict/" + dict_file + ".csv", "rb") as f:
-        verbs = f.readlines()
-    for v in verbs:
-        vinfo = v.decode('euc_jp',errors ='ignore').split(",")
-        conj = vinfo[9]
-        basicform = vinfo[10]
+    with open("../dict/pos/" + dict_file + ".csv", "rb") as f:
+        words = f.readlines()
+    for w in words:
+        winfo = w.decode('euc_jp',errors ='ignore').split(",")
+        conj = winfo[9]
+        basicform = winfo[10]
         if basicform == basic and conj == conjugate:
-            target_verb = vinfo[0]
+            target_word = winfo[0]
             break
-    return target_verb
+    return target_word
 
-
-
-def search_sim_words(word):
-    conn = sqlite3.connect("wnjpn.db")
-    cur = conn.execute("select wordid from word where lemma='%s'" % word)
-    word_id = -1
-    for row in cur:
-        word_id = row[0]
-
-    similar_words = []
-    cur = conn.execute("select synset from sense where wordid='%s'" % word_id)
-    synsets = []
-    for row in cur:
-        synsets.append(row[0])
-
-    # 概念に含まれる単語を検索
-    for synset in synsets:
-        cur3 = conn.execute("select wordid from sense where (synset='%s' and wordid!=%s)" % (synset,word_id))
-        for row3 in cur3:
-            target_word_id = row3[0]
-            cur3_1 = conn.execute("select lemma from word where wordid=%s" % target_word_id)
-            for row3_1 in cur3_1:
-            	# 全角文字のみでユニークな類義語のみ抽出
-                if re.match(r'[^\x01-\x7E]', row3_1[0]) and row3_1[0] not in similar_words:
-                    similar_words.append(row3_1[0])
-    return similar_words
-
-
-def confirm_pos(word):
+def analyze_pos(word):
     m = MeCab.Tagger()
     node = m.parseToNode(word)
-    p = None
+    p,kb = None, None
+    count = 0
     while node:
         pos = node.feature.split(",")[0]
         if pos != "BOS/EOS":
             p = pos
-            break
+            count += 1
+            if len(node.feature.split(",")) > 7:
+                kb = node.feature.split(",")[7]
         node = node.next
-    return p
-
-
-def choose_sim_word(words, pos):
-    while True:
-        r_idx = random.randint(0, len(words)-1)
-        c_word = words[r_idx]
-        sim_word_pos = confirm_pos(c_word)
-        if sim_word_pos == pos:
-            break
-    return c_word
-
+    # 合成語の場合は品詞特定不可とする
+    if count > 1:
+        p,kb = None, None
+    return p, kb
 
 
 def convert_kata_to_hira(katakana):
@@ -104,52 +107,81 @@ def convert_kata_to_hira(katakana):
     return hiragana
 
 
+def mistake_ppp(ppp):
+    substitute_ppp = ppp
+    mistake_set = np.array([["が", "は"],["で", "に"], ["から", "より"]])
+    target_pattern = mistake_set[np.any(mistake_set == ppp, axis = 1)]
+    if len(target_pattern) > 0:
+        the_other = target_pattern[np.where(target_pattern != ppp)]
+        substitute_ppp = the_other[0]
+    return substitute_ppp
+
+
 m = MeCab.Tagger()
 
-#text = "英語の勉強をしていて、うーん自分の英語ってどう聞こえているのかなと気になったので、日本語を弱らせてみました"
-#text = "自分の日本語を弱らせてみようかなと思いました。なんの役にも立たない記事でごめんなさい。"
-text = "英語の勉強をしていて、うーん自分の英語ってどう聞こえているのかなと気になったので、自分の日本語を弱らせてみようかなと思いました。なんの役にも立たない記事でごめんなさい。"
+text = "このプログラム自体は役に立ちませんが、弱い日本語の特徴を掴むことは今後の日本語教育に有用ではと思いました。日本語を勉強中の外国人たちが書いた日本語の文章の傾向を学習しクラスタリングすることで間違えやすい日本語のパターンが明らかになって、そのそれぞれにあった日本語教育カリキュラムが作れたりしそうですね。"
+
+
 node = m.parseToNode(text)
 
 word_list = []
 basic_list = []
+pos_list = []
 word_idx = 0 
+prog_bar = "▪️"
 
 while node:
     word = node.surface
     pos = node.feature.split(",")[0]
-    #conj = node.feature.split(",")[5]
-    org = node.feature.split(",")[6]
-    katakana = node.feature.split(",")[7]
+    conj = node.feature.split(",")[5]
+    basic = node.feature.split(",")[6]
+    if len(node.feature.split(",")) > 7:
+        katakana = node.feature.split(",")[7]
     xfmd_word = None
-    # 文頭・文末の空白の場合
-    if word == "":
-        xfmd_word = word
-        # 基本形を保存
-        basic_list.append(org)
-        # word_list.append(xfmd_word)
-    # それ以外の場合
-    else:
-        # 変換パターン①：{過去形}+た => {現在形}
-        if word == "た" and pos == "助動詞":
-            # 前の単語を現在形に置換する
-            word_list[word_idx - 1] =  basic_list[word_idx - 1]     
-            basic_list.append("")
-            xfmd_word = ""
-            #word_list.append("")
+    xfmd_basic = None
+    # 変換パターン①：助詞の混同
+    if pos == "助詞" and pos_list[word_idx - 1] == "名詞":
+        xfmd_basic = basic
+        xfmd_word = mistake_ppp(basic)
+    # 変換パターン②：{過去形}+た => {現在形}
+    elif pos == "助動詞" and word == "た":
+        # 前の単語を現在形に置換する
+        word_list[word_idx - 1] =  basic_list[word_idx - 1]
+        xfmd_basic = basic
+        xfmd_word = ""
+    # 変換パターン③：同音類義語変換
+    elif pos in ("動詞", "形容詞", "名詞"):
+        xfmd_basic = basic
+        # 基本形が"*"または"する"なら変換しない
+        if basic in ("*", "する"):
+            xfmd_word = word
         else:
-            # 記号は変換しない
-            if pos == "記号":
-                basic_list.append(org)
-                xfmd_word = word
-            # 変換パターン②：{漢字} => {ひらがな}
+            # WordNetを用いて同音類義語を取得する
+            synonym_basic = choose_synonym(basic)
+            # 動詞、形容詞は活用形があるので元の活用形と同じものに変換する
+            if pos in ("動詞", "形容詞"):
+                xfmd_word = transform(pos, synonym_basic, conj)
             else:
-                basic_list.append(org)
-                xfmd_word = convert_kata_to_hira(katakana)
-                #word_list.append(xfmd_word)
+                xfmd_word = synonym_basic
+    # 変換なし
+    else:
+        xfmd_basic = basic
+        xfmd_word = word
+    pos_list.append(pos)
+    basic_list.append(xfmd_basic)
     word_list.append(xfmd_word)
     word_idx += 1;
+    # TO DO: %の計算式を正確に
+    prog_per = f"{'{:.1f}'.format(2*word_idx/len(text)*100)} %: "
+    prog_bar += "▪️"
+    print(f"{prog_per}:{prog_bar}")
     node = node.next
 
+
 xfmd_word_str = u"".join(word_list)
+print(text)
+print("|")
+print("|")
+print("↓")
 print(xfmd_word_str)
+
