@@ -52,30 +52,29 @@ def choose_synonym(word):
     return synonym
 
 
-def transform(basic, conjugate):
-    pos, a = analyze_pos(basic)
-    target_verb = None
+def transform(pos, basic, conjugate):
+    target_word = None
     dict_file = None
-    if pos == "形容詞":
-        dict_file = "Adj"
-    elif pos == "動詞":
+
+    if pos == "動詞":
         dict_file = "Verb"
+    elif pos == "形容詞":
+        dict_file = "Adj"
     elif pos == "副詞":
         dict_file = "Adverb"
     elif pos == "名詞":
         dict_file = "Noun"
 
-
     with open("../dict/pos/" + dict_file + ".csv", "rb") as f:
-        verbs = f.readlines()
-    for v in verbs:
-        vinfo = v.decode('euc_jp',errors ='ignore').split(",")
-        conj = vinfo[9]
-        basicform = vinfo[10]
+        words = f.readlines()
+    for w in words:
+        winfo = w.decode('euc_jp',errors ='ignore').split(",")
+        conj = winfo[9]
+        basicform = winfo[10]
         if basicform == basic and conj == conjugate:
-            target_verb = vinfo[0]
+            target_word = winfo[0]
             break
-    return target_verb
+    return target_word
 
 def analyze_pos(word):
     m = MeCab.Tagger()
@@ -110,7 +109,7 @@ def convert_kata_to_hira(katakana):
 
 def mistake_ppp(ppp):
     substitute_ppp = ppp
-    mistake_set = np.array([["が", "は"],["から", "より"]])
+    mistake_set = np.array([["が", "は"],["で", "に"], ["から", "より"]])
     target_pattern = mistake_set[np.any(mistake_set == ppp, axis = 1)]
     if len(target_pattern) > 0:
         the_other = target_pattern[np.where(target_pattern != ppp)]
@@ -120,22 +119,7 @@ def mistake_ppp(ppp):
 
 m = MeCab.Tagger()
 
-#text = "耳の外側と内側のノイズをマイクロフォンが検知。その音と釣り合うアンチノイズ機能が、あなたが聞く前にノイズを消し去ります。"
-#text += "周囲の様子を聞いて対応したい時は、外部音取り込みモードに切り替えましょう。感圧センサーを長押しするだけです。"
-#text = "Amazonで欲しいものを探しまわっていたら、最近は怪しい商品の日本語説明文のレベルアップがしてきたなと感じまして、日本語難しいのに勉強熱心だなと感心していたところです。そんな中、まだ発展途上だった日本語説明文が恋しくなったので自分でそういう文章を作ってみようと思いました。"
 text = "このプログラム自体は役に立ちませんが、弱い日本語の特徴を掴むことは今後の日本語教育に有用ではと思いました。日本語を勉強中の外国人たちが書いた日本語の文章の傾向を学習しクラスタリングすることで間違えやすい日本語のパターンが明らかになって、そのそれぞれにあった日本語教育カリキュラムが作れたりしそうですね。"
-'''
-text = "包み込むようなサウンドを生み出すアクティブノイズキャンセリング"\
-"周囲の音が聞こえて、今起きていることがわかる外部音取り込みモード"\
-"装着感をカスタマイズできるように、ソフトな先細のシリコーン製イヤーチップを3つのサイズで用意"\
-"耐汗耐水性能"\
-"アダプティブイコライゼーションで音楽を耳の形に合わせて自動的に調節"\
-"すべてのApple製デバイスで簡単に設定"\
-"「Hey Siri」と声をかけるだけで瞬時にSiriへアクセス"\
-"Wireless Charging Caseを使えば、バッテリー駆動時間は24時間以上"\
-'''
-
-
 
 
 node = m.parseToNode(text)
@@ -163,18 +147,20 @@ while node:
     elif pos == "助動詞" and word == "た":
         # 前の単語を現在形に置換する
         word_list[word_idx - 1] =  basic_list[word_idx - 1]
-        xfmd_basic = ""
+        xfmd_basic = basic
         xfmd_word = ""
     # 変換パターン③：同音類義語変換
     elif pos in ("動詞", "形容詞", "名詞"):
         xfmd_basic = basic
+        # 基本形が"*"または"する"なら変換しない
         if basic in ("*", "する"):
             xfmd_word = word
         else:
+            # WordNetを用いて同音類義語を取得する
             synonym_basic = choose_synonym(basic)
+            # 動詞、形容詞は活用形があるので元の活用形と同じものに変換する
             if pos in ("動詞", "形容詞"):
-                if basic != "する":
-                    xfmd_word = transform(synonym_basic, conj)
+                xfmd_word = transform(pos, synonym_basic, conj)
             else:
                 xfmd_word = synonym_basic
     # 変換なし
@@ -185,6 +171,7 @@ while node:
     basic_list.append(xfmd_basic)
     word_list.append(xfmd_word)
     word_idx += 1;
+    # TO DO: %の計算式を正確に
     prog_per = f"{'{:.1f}'.format(2*word_idx/len(text)*100)} %: "
     prog_bar += "▪️"
     print(f"{prog_per}:{prog_bar}")
