@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 import MeCab
 import sqlite3
-import re
-import random
 import numpy as np
 from collections import namedtuple
 
